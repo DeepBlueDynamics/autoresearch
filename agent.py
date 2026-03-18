@@ -32,6 +32,7 @@ RUN_LOG = PROJECT_DIR / "run.log"
 RESULTS_HEADER = "commit\tval_bpb\tmemory_gb\tstatus\tdescription"
 RUN_TIMEOUT = 600  # 10 min hard kill
 SECTION_DELIM = re.compile(r"^# -{10,}")
+FERRICULA_URL = os.environ.get("FERRICULA_URL", "")  # set via --memory flag
 
 # ---------------------------------------------------------------------------
 # Tool implementations
@@ -282,6 +283,37 @@ def tool_read_code(start_line: int = 1, end_line: int = 50, **kwargs):
 
 
 # ---------------------------------------------------------------------------
+# Ferricula memory tools (thermodynamic memory engine)
+# ---------------------------------------------------------------------------
+
+def _ferricula_post(endpoint, payload):
+    """POST to ferricula, returns response text or error."""
+    if not FERRICULA_URL:
+        return json.dumps({"error": "No ferricula URL configured. Use --memory flag."})
+    import urllib.request
+    url = f"{FERRICULA_URL.rstrip('/')}/{endpoint}"
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.read().decode()
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def tool_remember(text: str, **kwargs):
+    """Store an experiment result or insight in ferricula's thermodynamic memory.
+    Memories decay over time, strengthen on recall, and consolidate during dream cycles."""
+    return _ferricula_post("remember", {"text": text})
+
+
+def tool_recall(query: str, k: int = 5, **kwargs):
+    """Search ferricula memory for similar past experiments, insights, or patterns.
+    Returns the k most relevant memories ranked by similarity and recency."""
+    return _ferricula_post("recall", {"text": query, "k": k})
+
+
+# ---------------------------------------------------------------------------
 # Tool registry
 # ---------------------------------------------------------------------------
 
@@ -360,6 +392,29 @@ TOOLS = {
                 "end_line": {"type": "integer", "description": "Last line to read (1-indexed)"},
             },
             "required": ["start_line", "end_line"],
+        },
+    },
+    "remember": {
+        "fn": tool_remember,
+        "description": "Store an experiment result or insight in persistent thermodynamic memory (ferricula). Memories decay, strengthen on recall, and consolidate during dream cycles. Use after each experiment to build long-term knowledge.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "What to remember — experiment description, result, insight, or pattern"},
+            },
+            "required": ["text"],
+        },
+    },
+    "recall": {
+        "fn": tool_recall,
+        "description": "Search persistent memory for similar past experiments, insights, or patterns. Returns the k most relevant memories ranked by similarity. Use before proposing a new experiment to check if something similar was tried.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What to search for — a description of the experiment you're considering"},
+                "k": {"type": "integer", "description": "Number of results to return (default: 5)"},
+            },
+            "required": ["query"],
         },
     },
 }
@@ -568,6 +623,13 @@ Minimize val_bpb (validation bits per byte) — lower is better. Each training r
 - keep: commit improvement + log to results.tsv
 - discard: revert failed experiment + log to results.tsv
 - read_code: inspect specific lines of train.py
+- remember: store an experiment result or insight in persistent memory (survives context resets)
+- recall: search memory for similar past experiments before trying something new
+
+## Memory (ferricula)
+You have a persistent thermodynamic memory. After each experiment, remember what you tried and what happened.
+Before proposing a new experiment, recall similar past attempts to avoid repeating failures.
+Memories decay when ignored, strengthen when recalled, and consolidate during dream cycles.
 
 ## Strategy
 - Time-constrained optimization: more gradient steps in 5 min often beats larger models/batches
@@ -608,7 +670,14 @@ def main():
     parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--max-experiments", type=int, default=0, help="Stop after N experiments (0 = unlimited)")
     parser.add_argument("--tag", type=str, default=None, help="Git branch tag (creates autoresearch/<tag>)")
+    parser.add_argument("--memory", type=str, default=None, help="Ferricula memory URL (e.g. http://localhost:8765)")
     args = parser.parse_args()
+
+    # Ferricula memory setup
+    global FERRICULA_URL
+    if args.memory:
+        FERRICULA_URL = args.memory
+        print(f"Memory: {FERRICULA_URL}")
 
     # Branch setup
     if args.tag:
