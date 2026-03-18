@@ -6,77 +6,87 @@ Give an AI agent a real LLM training setup and let it experiment autonomously ov
 
 ## What's different in this fork
 
-- **Agent harness** (`agent.py`) — structured tool-calling agent that works with Claude, GPT, or Gemini. The agent gets tools to tweak hyperparameters, edit architecture, run experiments, and keep/discard results. No more copy-pasting into a chat window.
-- **SDR entropy seeding** — replaces the fixed `torch.manual_seed(42)` with true hardware randomness from an RTL-SDR radio receiver via [sdr-random](https://github.com/DeepBlueDynamics/sdr-random).
-- **Optimized defaults** — hyperparameters tuned from 215 experiments across Karpathy's sessions ([Discussion #32](https://github.com/karpathy/autoresearch/discussions/32), [#43](https://github.com/karpathy/autoresearch/discussions/43)): depth 9, halved batch size, SSSSL window pattern, RoPE base 200K, weight decay on embeddings/VE/lm_head, 0.68x init scale, longer warmdown. Baseline 0.9979 -> 0.9697 val_bpb on H100.
+- **Agent harness** (`agent.py`) — structured tool-calling agent that works with Claude, GPT, or Gemini. 10 tools for autonomous experimentation including persistent thermodynamic memory via [ferricula](https://github.com/DeepBlueDynamics/ferricula).
+- **Weber electrodynamic optimizer** — applies Weber's force law bracket `W = 1 - v²/(2c²) + v·a/c²` to learning rate, modifying effective step size based on parameter velocity and acceleration. Physics-inspired adaptive optimization.
+- **SDR entropy seeding** — replaces the fixed `torch.manual_seed(42)` with true hardware randomness from an RTL-SDR radio receiver via [sdr-random](https://github.com/DeepBlueDynamics/sdr-random). Falls back to `os.urandom` if unavailable.
+- **Multi-GPU support** — auto-detects Flash Attention 3 (H100/Hopper) or falls back to PyTorch SDPA (consumer GPUs). Windows support with automatic `torch.compile` bypass.
+- **Optimized defaults** — hyperparameters from 215 experiments across Karpathy's sessions ([Discussion #32](https://github.com/karpathy/autoresearch/discussions/32), [#43](https://github.com/karpathy/autoresearch/discussions/43)).
+- **Docker** — container with NVIDIA GPU passthrough, compose stack with ferricula memory service.
 
 ## Quick start
 
 **Requirements:** Single NVIDIA GPU, Python 3.10+, [uv](https://docs.astral.sh/uv/).
 
 ```bash
-# Install uv
+# 1. Install uv
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Install dependencies
+# 2. Install dependencies
 uv sync
 
-# Download data + train tokenizer (one-time, ~2 min)
+# 3. Download data + train tokenizer (one-time, ~2 min)
 uv run prepare.py
 
-# Run a single training experiment (~5 min)
+# 4. Run a single training experiment (~5 min)
 uv run train.py
 ```
 
-### Platform notes
+## Platform support
 
-**H100 / Hopper GPUs**: Everything works out of the box. Flash Attention 3 + torch.compile + Triton.
+| Platform | Flash Attn | torch.compile | Notes |
+|----------|-----------|---------------|-------|
+| **H100 / Hopper** | FA3 (native) | Triton | Full speed, no changes needed |
+| **RTX 3060/4090 / Ampere+** | PyTorch SDPA (auto-fallback) | Triton (Linux) | Tune DEPTH, BATCH_SIZE for VRAM |
+| **Windows (any GPU)** | PyTorch SDPA (auto-fallback) | Eager mode (auto) | Triton unavailable, runs slower |
 
-**RTX 3060 / 4090 / consumer GPUs**: FA3 is Hopper-only. The script auto-detects and falls back to PyTorch SDPA. You'll need to tune hyperparameters for your VRAM:
+The script auto-detects everything. No manual flags needed — just tune hyperparameters for your VRAM.
 
-```bash
-# Example for RTX 3060 12GB
-# In train.py, set:
+### Tuning for smaller GPUs
+
+The defaults are optimized for H100 80GB. For consumer GPUs, edit the hyperparameters block in `train.py`:
+
+```python
+# RTX 3060 12GB
 DEPTH = 4
 DEVICE_BATCH_SIZE = 16
 TOTAL_BATCH_SIZE = 2**16
 WINDOW_PATTERN = "SL"
+
+# RTX 4090 24GB
+DEPTH = 6
+DEVICE_BATCH_SIZE = 32
+TOTAL_BATCH_SIZE = 2**17
+WINDOW_PATTERN = "SSL"
 ```
-
-**Windows**: Triton isn't available on Windows, so `torch.compile` is automatically disabled. Training runs in eager mode (slower but functional).
-
-**Data**: The script expects data in `~/.cache/autoresearch/`. Run `uv run prepare.py` once to download and prepare it.
 
 ## Running the agent
 
-The agent harness gives any LLM provider structured tools to run experiments autonomously.
-
 ```bash
-# Install agent dependencies (pick your provider)
+# Install your provider's SDK
 uv pip install anthropic  # or: openai, google-genai
 
 # Set your API key
 export ANTHROPIC_API_KEY=sk-ant-...  # Linux/Mac
-set ANTHROPIC_API_KEY=sk-ant-...     # Windows
+set ANTHROPIC_API_KEY=sk-ant-...     # Windows cmd
+$env:ANTHROPIC_API_KEY="sk-ant-..."  # PowerShell
 
 # Run with Claude
 uv run python agent.py --provider anthropic --model claude-sonnet-4-20250514
 
 # Run with GPT
-python agent.py --provider openai --model gpt-4o
+uv run python agent.py --provider openai --model gpt-4o
 
 # Run with Gemini
-python agent.py --provider gemini --model gemini-2.0-flash
+uv run python agent.py --provider gemini --model gemini-2.0-flash
 
-# Run on a named branch, limit experiments
-python agent.py --provider anthropic --model claude-sonnet-4-20250514 --tag mar18 --max-experiments 20
+# Limit experiments, use a named branch
+uv run python agent.py --provider anthropic --model claude-sonnet-4-20250514 --tag mar18 --max-experiments 20
+
+# With ferricula memory (persistent experiment memory across runs)
+uv run python agent.py --provider anthropic --model claude-sonnet-4-20250514 --memory http://localhost:8765
 ```
 
-Set your API key as an environment variable: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GOOGLE_API_KEY`.
-
 ### Agent tools
-
-The agent gets 8 tools it can call during the experiment loop:
 
 | Tool | What it does |
 |------|-------------|
@@ -88,6 +98,8 @@ The agent gets 8 tools it can call during the experiment loop:
 | `keep` | Git commit + log improvement to results.tsv |
 | `discard` | Revert changes + log failure to results.tsv |
 | `read_code` | Inspect specific lines of train.py |
+| `remember` | Store insight in persistent thermodynamic memory (ferricula) |
+| `recall` | Search memory for similar past experiments |
 
 The agent loops autonomously: check config, propose a change, run it, evaluate, keep or discard, repeat. Context auto-compresses so it can run indefinitely.
 
@@ -99,9 +111,24 @@ You can also run experiments the original way — point Claude Code, Codex, or a
 Hi have a look at program.md and let's kick off a new experiment!
 ```
 
+## Weber electrodynamic optimizer
+
+Applies Weber's force law bracket to the optimizer step, modifying effective learning rate based on parameter velocity (momentum) and acceleration (change in momentum):
+
+```
+W = 1 - v²/(2c²) + v·a/c²
+```
+
+- **Stable momentum** (v small): W ~ 1, normal update
+- **Accelerating params** (v·a > 0): W > 1, larger step — leans into acceleration
+- **Decelerating params** (v·a < 0): W < 1, smaller step — eases off
+- **Fast params** (v² large): -v²/2c² damps — natural speed limit
+
+Applied to both AdamW (per-element) and Muon (per-matrix). Controlled by `WEBER_C_SQ` hyperparameter (default 1.0). Larger = subtler correction.
+
 ## SDR entropy seeding
 
-This fork seeds PyTorch's RNG with true hardware randomness from an RTL-SDR radio receiver. The entropy comes from ADC quantization noise — physically random, not pseudorandom.
+Seeds PyTorch's RNG with true hardware randomness from an RTL-SDR radio receiver. Entropy comes from ADC quantization noise — physically random, not pseudorandom.
 
 Requires [sdr-random](https://github.com/DeepBlueDynamics/sdr-random) running on a machine with an RTL-SDR dongle:
 
@@ -109,24 +136,48 @@ Requires [sdr-random](https://github.com/DeepBlueDynamics/sdr-random) running on
 # On the SDR host
 sdr-rand local --port 9090
 
-# train.py auto-fetches entropy at startup, falls back to os.urandom if unavailable
+# train.py auto-fetches from http://<host>:9090/api/entropy
+# Falls back to os.urandom if unavailable
 uv run train.py
 ```
+
+Configure the SDR host IP in `train.py` (search for `192.168.86.24`).
+
+## Docker
+
+```bash
+# One-time: download data
+docker compose --profile setup run prepare
+
+# Run training
+docker compose run train
+
+# Run the autonomous agent
+ANTHROPIC_API_KEY=sk-ant-... docker compose run agent
+
+# Full stack with ferricula memory
+docker compose up ferricula -d
+ANTHROPIC_API_KEY=sk-ant-... docker compose run agent
+```
+
+Requires `nvidia-container-toolkit` for GPU passthrough.
 
 ## Project structure
 
 ```
-train.py        — model, optimizer, training loop (agent modifies this)
-prepare.py      — constants, data prep, evaluation (do not modify)
-agent.py        — autonomous experiment agent (Claude / GPT / Gemini)
-program.md      — manual-mode agent instructions
-pyproject.toml  — dependencies
-results.tsv     — experiment log (auto-generated)
+train.py          model, optimizer, training loop (agent modifies this)
+prepare.py        constants, data prep, evaluation (do not modify)
+agent.py          autonomous experiment agent (Claude / GPT / Gemini)
+program.md        manual-mode agent instructions
+pyproject.toml    dependencies
+Dockerfile        CUDA runtime + uv + PyTorch
+docker-compose.yml  train, agent, ferricula, prepare services
+results.tsv       experiment log (auto-generated)
 ```
 
 ## Optimized defaults
 
-This fork ships with hyperparameters validated across 215 experiments on H100:
+Hyperparameters validated across 215 experiments on H100:
 
 | Setting | Upstream | This fork | Impact |
 |---------|----------|-----------|--------|
@@ -145,6 +196,7 @@ This fork ships with hyperparameters validated across 215 experiments on H100:
 | VE WD | 0.0 | 0.003 | -0.003 cumulative |
 | LM head WD | 0.0 | 0.01 | -0.009 |
 | Softcap | float32 before tanh | bf16 tanh, then float32 | saves ~4GB VRAM |
+| **Weber c²** | N/A | 1.0 | velocity-dependent LR bracket |
 
 ## License
 
